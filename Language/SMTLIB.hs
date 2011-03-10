@@ -45,12 +45,18 @@ module Language.SMTLIB
   , checkScript
   , checkResponses
   , checkParser
+  -- * For Hind
+  , responses
+  , script
+  , left, right, symbol, identifier, tok, lexSMTLIB
+  , Token(..)
   ) where
 
 import Data.List hiding (group)
 import System.Directory
 import System.IO
-import Text.ParserCombinators.Poly.Lazy hiding (Success)
+-- import Text.ParserCombinators.Poly.Lazy hiding (Success)
+import Text.ParserCombinators.Poly.Plain hiding (Success)
 import Text.Printf
 
 import Language.SMTLIB.Lexer
@@ -71,7 +77,7 @@ instance Show Spec_constant where
     Spec_constant_numeral     a -> show a
     Spec_constant_decimal     a -> show (realToFrac a :: Double)
     Spec_constant_hexadecimal a -> printf "#x%s" a
-    Spec_constant_binary      a -> printf "#b%s" [ if a then '1' else '0' | a <- a ]
+    Spec_constant_binary      a -> printf "bvbin%s[%d]" [ if a then '1' else '0' | a <- a ] (length a)
     Spec_constant_string      a -> show a
 
 spec_constant :: SMTLIB Spec_constant
@@ -543,7 +549,7 @@ data Gen_response
 instance Show Gen_response where
   show a = case a of
     Unsupported  -> "unsupported"
-    Success      -> "sucess"
+    Success      -> "success"
     Error a      -> group ["error", show a]
 
 gen_response :: SMTLIB Gen_response
@@ -684,6 +690,7 @@ showBool :: Bool -> String
 showBool a = if a then "true" else "false"
 
 type SMTLIB a = Parser Token a
+-- type SMTLIB a = Parser a
 
 tok :: Token -> SMTLIB ()
 tok a = satisfy (==  a) >> return ()
@@ -729,19 +736,19 @@ b_value = oneOf
   ]
 
 -- | Lazily parses an SMT-LIB command script.
-parseScript :: String -> Script
+parseScript :: String -> Either String Script
 parseScript s = fst $ runParser script $ lexSMTLIB s
 
 -- | Lazily parses an SMT-LIB command responses.
-parseResponses :: String -> [Command_response]
+parseResponses :: String -> Either String [Command_response]
 parseResponses s = fst $ runParser responses $ lexSMTLIB s
 
 -- | Lazily parses an SMT-LIB theory declaration.
-parseTheory :: String -> Theory_decl
+parseTheory :: String -> Either String Theory_decl
 parseTheory s = fst $ runParser theory_decl $ lexSMTLIB s
 
 -- | Lazily parses an SMT-LIB logic.
-parseLogic :: String -> Logic
+parseLogic :: String -> Either String Logic
 parseLogic s = fst $ runParser logic $ lexSMTLIB s
 
 -- | Checks the parsing of a command script.
@@ -794,7 +801,7 @@ checkParser = do
             return pass
           else return True
 
-  
+
 
 
 

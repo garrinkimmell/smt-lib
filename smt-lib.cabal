@@ -1,5 +1,5 @@
 name:    smt-lib
-version: 0.0.3
+version: 0.0.4
 
 category: Language
 
@@ -25,7 +25,7 @@ extra-source-files:
 library
     build-depends:
         base       >= 4.0 && < 5.0,
-        directory  >= 1.0 && < 1.1,
+        directory >= 1.0.1.2,
         array      >= 0.3 && < 0.4,
         polyparse  >= 1.4
 
