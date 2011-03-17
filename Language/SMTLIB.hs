@@ -132,17 +132,23 @@ identifier = oneOf
 data Sort
   = Sort_bool
   | Sort_identifier  Identifier
+  | Sort_bitvec Numeral
   | Sort_identifiers Identifier [Sort]
 
 instance Show Sort where
   show a = case a of
     Sort_bool -> "Bool"
+    Sort_bitvec size -> "BitVec[" ++ show size ++ "]"
     Sort_identifier  a -> show a
     Sort_identifiers a b -> group $ show a : map show b
 
 sort' :: SMTLIB Sort
 sort' = oneOf
   [ tok (Symbol "Bool") >> return Sort_bool
+  ,
+    -- For z3 specific bitvec syntax.
+    do { tok (Symbol "BitVec"); leftBracket; size <- numeral;
+         rightBracket; return (Sort_bitvec size) }
   , identifier >>= return . Sort_identifier
   , do { left; a <- identifier; b <- many1 sort'; right; return $ Sort_identifiers a b }
   ]
@@ -700,6 +706,11 @@ left = tok LeftParen
 
 right :: SMTLIB ()
 right = tok RightParen
+
+leftBracket,rightBracket :: SMTLIB ()
+leftBracket = tok LeftBracket
+rightBracket = tok RightBracket
+
 
 numeral :: SMTLIB Numeral
 numeral = do

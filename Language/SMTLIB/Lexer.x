@@ -32,6 +32,8 @@ tokens :-
   $digit                             { Numeral . read }
   \(                                 { const LeftParen  }
   \)                                 { const RightParen }
+  \[																 { const LeftBracket }
+  \]																 { const RightBracket }
   \"(([$printable \n # \\]|\\.)*)\"  { String . read }
   "#x"$hex+                          { Hex . drop 2 }
   "#b"$bin+                          { Bin . drop 2 }
@@ -48,6 +50,8 @@ data Token
   | Keyword String
   | LeftParen
   | RightParen
+  | LeftBracket
+  | RightBracket
   deriving (Eq,Show)
 
 lexSMTLIB :: String -> [Token]
