@@ -909,7 +909,7 @@ commandResponseSource handle action =
   where responseIteratee p = icont (f (parse p)) Nothing
         f k (EOF Nothing) =
           case feed (k B.empty) B.empty of
-            Atto.Fail _ err dsc -> throwErr (toException $ ParseError err dsc)
+            Atto.Fail _ err dsc -> throwErr (toException $ ParseError err ("eof: " ++ dsc))
             Atto.Partial _ -> throwErr (toException EofException)
             Atto.Done rest v
               | B.null rest -> idone v (EOF Nothing)
@@ -919,7 +919,7 @@ commandResponseSource handle action =
           | B.null s = icont (f k) Nothing
           | otherwise = do
               case k s of
-                Atto.Fail _ err dsc -> throwErr (toException $ ParseError err dsc)
+                Atto.Fail _ err dsc -> throwErr (toException $ ParseError err ("chunk: " ++ dsc))
                 Atto.Partial k' -> icont (f k') Nothing
                 Atto.Done rest v -> do
                        lift $ action v
