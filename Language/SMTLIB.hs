@@ -47,11 +47,7 @@ module Language.SMTLIB
   , checkParser
   -- * For Hind
   , parseScriptFile
-  , command_response
-  , responses
-  , script
-  , left, right, symbol, identifier, tok
-  -- , Token(..)
+  , commandResponseSource
   )
 
   where
@@ -68,9 +64,12 @@ import qualified Data.ByteString.Char8 as B
 import Data.Attoparsec hiding (string,option)
 import qualified Data.Attoparsec as Atto
 import qualified Data.Attoparsec.Char8 as C
--- These are redundant because the Iteratee interface doesn't work.
--- import Data.Attoparsec.Iteratee
--- import Data.Iteratee(fileDriver,Iteratee)
+
+import Data.Attoparsec.Iteratee
+import Data.Iteratee hiding (group,length)
+import Data.Iteratee.IO.Handle(enumHandle)
+import Control.Exception
+import Control.Monad.Trans
 
 
 
@@ -889,6 +888,11 @@ checkParser = do
 
 
 
+-- Parse a script file.
+parseScriptFile :: FilePath -> IO (Either String Script)
+parseScriptFile path = do
+  cnts <- B.readFile path
+  return $ parseOnly script cnts
 
 
 -- Iteratee based file parsing The following doesn't work, because it seems to
@@ -896,12 +900,27 @@ checkParser = do
 -- to this bug: http://hackage.haskell.org/trac/ghc/ticket/5060
 --parseScriptFile :: FilePath -> IO Script
 --parseScriptFile = fileDriver (parserToIteratee script)
-parseScriptFile :: FilePath -> IO (Either String Script)
-parseScriptFile path = do
-  cnts <- B.readFile path
-  return $ parseOnly script cnts
 
 
-
-
-
+-- Process a stream of command responses from the handle, invoking the parameter
+-- action on each response.
+commandResponseSource handle action =
+    enumHandle 1 handle (responseIteratee command_response) >>= run >> return ()
+  where responseIteratee p = icont (f (parse p)) Nothing
+        f k (EOF Nothing) =
+          case feed (k B.empty) B.empty of
+            Atto.Fail _ err dsc -> throwErr (toException $ ParseError err dsc)
+            Atto.Partial _ -> throwErr (toException EofException)
+            Atto.Done rest v
+              | B.null rest -> idone v (EOF Nothing)
+              | otherwise -> idone v (Chunk rest)
+        f _ (EOF (Just e)) = throwErr e
+        f k (Chunk s)
+          | B.null s = icont (f k) Nothing
+          | otherwise = do
+              case k s of
+                Atto.Fail _ err dsc -> throwErr (toException $ ParseError err dsc)
+                Atto.Partial k' -> icont (f k') Nothing
+                Atto.Done rest v -> do
+                       lift $ action v
+                       icont (f (\bs -> feed (parse command_response rest) bs)) Nothing

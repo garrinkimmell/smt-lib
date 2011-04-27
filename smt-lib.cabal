@@ -27,12 +27,11 @@ library
         base       >= 4.0 && < 5.0,
         directory,
         array      >= 0.3 && < 0.4,
-        attoparsec, iteratee, attoparsec-iteratee, bytestring
+        attoparsec, iteratee, attoparsec-iteratee, bytestring, monads-fd
 
 
     exposed-modules:
         Language.SMTLIB
-        Language.SMTLIB.Lexer
 
     ghc-options: -W
 
