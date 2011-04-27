@@ -1,5 +1,6 @@
 -- | Parsing and printing SMT-LIB.
 module Language.SMTLIB
+{-
   (
   -- * Syntax
     Numeral
@@ -50,16 +51,28 @@ module Language.SMTLIB
   , script
   , left, right, symbol, identifier, tok, lexSMTLIB
   , Token(..)
-  ) where
+  )
+-}
+  where
 
 import Data.List hiding (group)
 import System.Directory
 import System.IO
+import Control.Monad(unless)
 -- import Text.ParserCombinators.Poly.Lazy hiding (Success)
-import Text.ParserCombinators.Poly.Plain hiding (Success)
-import Text.Printf
+-- import Text.ParserCombinators.Poly.Plain hiding (Success)
 
+import Text.Printf
+import Control.Applicative hiding (many)
 import Language.SMTLIB.Lexer
+
+import qualified Data.ByteString.Char8 as B
+import Data.Attoparsec hiding (string,option)
+import qualified Data.Attoparsec as Atto
+import qualified Data.Attoparsec.Char8 as C
+
+
+
 
 type Numeral      = Integer
 type Symbol       = String
@@ -81,16 +94,14 @@ instance Show Spec_constant where
     Spec_constant_string      a -> show a
 
 spec_constant :: SMTLIB Spec_constant
-spec_constant = oneOf
-  [ numeral >>= return . Spec_constant_numeral
-  , string  >>= return . Spec_constant_string
-  , do
-      a <- satisfy (\ a -> case a of { Decimal _ -> True; Hex _ -> True; Bin _ -> True; _ -> False })
-      case a of
-        Decimal a -> return $ Spec_constant_decimal $ toRational a
-        Hex     a -> return $ Spec_constant_hexadecimal a
-        Bin     a -> return $ Spec_constant_binary $ map (== '1') a
-        _ -> undefined
+spec_constant = choice
+  [ Spec_constant_numeral <$> numeral
+  , Spec_constant_string <$> string
+    -- FIXME: Should I really be using double?
+  , Spec_constant_decimal . toRational  <$> C.double
+    -- TODO: Handle Hexadecimal and Binary.
+    -- , Spec_constant_hexadecimal <$> hexadecimal
+    -- , Spec_constant_binary <$> hexadecimal
   ]
 
 data S_expr
@@ -106,12 +117,13 @@ instance Show S_expr where
     S_expr_keyword  a -> a
     S_exprs         a -> group $ map show a
 
+
 s_expr :: SMTLIB S_expr
-s_expr = oneOf
-  [ spec_constant >>= return . S_expr_constant
-  , symbol        >>= return . S_expr_symbol
-  , keyword       >>= return . S_expr_keyword
-  , do { left; a <- many s_expr; right; return $ S_exprs a }
+s_expr = choice
+  [ S_expr_constant <$> spec_constant
+  , S_expr_symbol <$> symbol
+  , S_expr_keyword <$> keyword
+  , (left *> (S_exprs <$>  many s_expr) <* right)
   ]
 
 data Identifier
@@ -124,10 +136,11 @@ instance Show Identifier where
     Identifier_ a b -> group $ ["_", a] ++ map show b
 
 identifier :: SMTLIB Identifier
-identifier = oneOf
-  [ symbol >>= return . Identifier
-  , do { left; tok (Symbol "_"); a <- symbol; b <- many1 numeral; right; return $ Identifier_ a b }
+identifier = choice
+  [ Identifier <$> symbol
+  , left *> C.char  '_' *> (Identifier_ <$> symbol <*>  many1 numeral) <* right
   ]
+
 
 data Sort
   = Sort_bool
@@ -138,19 +151,20 @@ data Sort
 instance Show Sort where
   show a = case a of
     Sort_bool -> "Bool"
+    -- Z3 specific bitvec syntax
     Sort_bitvec size -> "BitVec[" ++ show size ++ "]"
     Sort_identifier  a -> show a
     Sort_identifiers a b -> group $ show a : map show b
 
+
 sort' :: SMTLIB Sort
-sort' = oneOf
-  [ tok (Symbol "Bool") >> return Sort_bool
+sort' = choice
+  [ tok "Bool" >> return Sort_bool
   ,
     -- For z3 specific bitvec syntax.
-    do { tok (Symbol "BitVec"); leftBracket; size <- numeral;
-         rightBracket; return (Sort_bitvec size) }
-  , identifier >>= return . Sort_identifier
-  , do { left; a <- identifier; b <- many1 sort'; right; return $ Sort_identifiers a b }
+    tok "BitVec" *> leftBracket *> (Sort_bitvec <$> numeral) <* rightBracket
+  , Sort_identifier <$>  identifier
+  , left *> (Sort_identifiers <$> identifier <*>  many1 sort') <* right
   ]
 
 data Attribute_value
@@ -165,11 +179,12 @@ instance Show Attribute_value where
     Attribute_value_s_expr        a -> group $ map show a
 
 attribute_value :: SMTLIB Attribute_value
-attribute_value = oneOf
-  [ spec_constant >>= return . Attribute_value_spec_constant
-  , symbol        >>= return . Attribute_value_symbol
-  , do { left; a <- many s_expr; right; return $ Attribute_value_s_expr a }
+attribute_value = choice
+  [ Attribute_value_spec_constant <$> spec_constant
+  , Attribute_value_symbol <$> symbol
+  , left *> (Attribute_value_s_expr <$> many s_expr) <* right
   ]
+
 
 data Attribute
   = Attribute        Keyword
@@ -181,9 +196,9 @@ instance Show Attribute where
     Attribute_s_expr a b -> a ++ " " ++ show b
 
 attribute :: SMTLIB Attribute
-attribute = oneOf
-  [ do { a <- keyword; b <- s_expr; return $ Attribute_s_expr a b }
-  , keyword >>= return . Attribute
+attribute = choice
+  [ Attribute_s_expr <$> keyword <*> s_expr
+  , Attribute <$> keyword
   ]
 
 data Qual_identifier
@@ -196,10 +211,12 @@ instance Show Qual_identifier where
     Qual_identifier_sort a b -> group ["as", show a, show b]
 
 qual_identifier :: SMTLIB Qual_identifier
-qual_identifier = oneOf
-  [ identifier >>= return . Qual_identifier
-  , do { left; tok $ Symbol "as"; a <- identifier; b <- sort'; right; return $ Qual_identifier_sort a b }
+qual_identifier = choice
+  [ Qual_identifier <$> identifier
+  , left *>  tok "as" *> (Qual_identifier_sort <$> identifier <*>  sort') <* right
+
   ]
+
 
 data Var_binding
   = Var_binding Symbol Term
@@ -209,7 +226,8 @@ instance Show Var_binding where
     Var_binding a b -> group [a, show b]
 
 var_binding :: SMTLIB Var_binding
-var_binding = do { left; a <- symbol; b <- term; right; return $ Var_binding a b }
+var_binding = parens (Var_binding <$> symbol <*> term)
+
 
 data Sorted_var
   = Sorted_var Symbol Sort
@@ -219,7 +237,7 @@ instance Show Sorted_var where
     Sorted_var a b -> group [a, show b]
 
 sorted_var :: SMTLIB Sorted_var
-sorted_var = do { left; a <- symbol; b <- sort'; right; return $ Sorted_var a b }
+sorted_var = parens (Sorted_var <$> symbol <*> sort')
 
 data Term
   = Term_spec_constant    Spec_constant
@@ -242,17 +260,20 @@ instance Show Term where
     Term_exists           a b -> group $ ["exists", group $ map show a, show b]
     Term_attributes       a b -> group $ ["!", show a] ++ map show b
 
+
 term :: SMTLIB Term
-term = oneOf
-  [ spec_constant   >>= return . Term_spec_constant
-  , qual_identifier >>= return . Term_qual_identifier
-  , do { left; a <- qual_identifier; b <- many1 term; right; return $ Term_qual_identifier_ a b }
-  , do { left; tok $ Symbol "distinct"; a <- term; b <- many1 term; right; return $ Term_distinct a b }
-  , do { left; tok $ Symbol "let";    left; a <- many1 var_binding; right; b <- term; right; return $ Term_let a b }
-  , do { left; tok $ Symbol "forall"; left; a <- many1 sorted_var;  right; b <- term; right; return $ Term_forall a b }
-  , do { left; tok $ Symbol "exists"; left; a <- many1 sorted_var;  right; b <- term; right; return $ Term_exists a b }
-  , do { left; tok $ Symbol "!"; a <- term;  b <- many1 attribute; right; return $ Term_attributes a b }
+term = choice
+  [ Term_spec_constant <$> spec_constant
+  , Term_qual_identifier <$> qual_identifier
+  , parens (Term_qual_identifier_ <$> qual_identifier <*> many term)
+  , parens (tok "distinct" *> (Term_distinct <$> term <*> many1 term))
+  , parens (tok "let" *> (Term_let <$> (parens (many1 var_binding)) <*> term))
+  , parens (tok "forall" *> (Term_forall <$> (parens (many1 sorted_var)) <*> term))
+  , parens (tok "exists" *> (Term_exists <$> (parens (many1 sorted_var)) <*> term))
+  , parens (C.char '!' *> (Term_attributes <$> term <*> many1 attribute))
   ]
+
+
 
 data Sort_symbol_decl
   = Sort_symbol_decl Identifier Numeral [Attribute]
@@ -262,7 +283,9 @@ instance Show Sort_symbol_decl where
     Sort_symbol_decl a b c -> group $ [show a, show b] ++ map show c
 
 sort_symbol_decl :: SMTLIB Sort_symbol_decl
-sort_symbol_decl = do { left; a <- identifier; b <- numeral; c <- many attribute; right; return $ Sort_symbol_decl a b c }
+sort_symbol_decl =
+  parens (Sort_symbol_decl <$> identifier <*> numeral <*> many attribute)
+
 
 data Meta_spec_constant
   = Meta_spec_constant_numeral
@@ -276,10 +299,10 @@ instance Show Meta_spec_constant where
     Meta_spec_constant_string  -> "STRING"
 
 meta_spec_constant :: SMTLIB Meta_spec_constant
-meta_spec_constant = oneOf
-  [ do { tok $ Symbol "NUMERAL"; return Meta_spec_constant_numeral }
-  , do { tok $ Symbol "DECIMAL"; return Meta_spec_constant_decimal }
-  , do { tok $ Symbol "STRING" ; return Meta_spec_constant_string  }
+meta_spec_constant = choice
+  [ do { tok "NUMERAL"; return Meta_spec_constant_numeral }
+  , do { tok "DECIMAL"; return Meta_spec_constant_decimal }
+  , do { tok "STRING" ; return Meta_spec_constant_string  }
   ]
 
 data Fun_symbol_decl
@@ -294,11 +317,14 @@ instance Show Fun_symbol_decl where
     Fun_symbol_decl                    a b c -> group $ [show a] ++ map show b ++ map show c
 
 fun_symbol_decl :: SMTLIB Fun_symbol_decl
-fun_symbol_decl = oneOf
-  [ do { left; a <- spec_constant;      b <- sort'; c <- many attribute; right; return $ Fun_symbol_decl_spec_constant      a b c }
-  , do { left; a <- meta_spec_constant; b <- sort'; c <- many attribute; right; return $ Fun_symbol_decl_meta_spec_constant a b c }
-  , do { left; a <- identifier; b <- many1 sort'; c <- many attribute; right; return $ Fun_symbol_decl a b c }
+fun_symbol_decl = choice
+  [parens (Fun_symbol_decl_spec_constant <$> spec_constant <*> sort' <*> many attribute)
+  , parens (Fun_symbol_decl_meta_spec_constant <$>
+              meta_spec_constant <*> sort' <*> many attribute)
+
+  ,parens (Fun_symbol_decl <$> identifier <*> many1 sort' <*> many attribute)
   ]
+
 
 data Par_fun_symbol_decl
   = Par_fun_symbol_decl Fun_symbol_decl
@@ -310,10 +336,15 @@ instance Show Par_fun_symbol_decl where
     Par_fun_symbol_decl_symbols a b c d -> group ["par", group $ map show a, group $ [show b] ++ map show c ++ map show d]
 
 par_fun_symbol_decl :: SMTLIB Par_fun_symbol_decl
-par_fun_symbol_decl = oneOf
-  [ fun_symbol_decl >>= return . Par_fun_symbol_decl
-  , do { left; tok $ Symbol "par"; left; a <- many1 symbol; right; left; b <- identifier; c <- many1 sort'; d <- many attribute; right; right; return $ Par_fun_symbol_decl_symbols a b c d }
+par_fun_symbol_decl = choice
+  [ Par_fun_symbol_decl <$> fun_symbol_decl
+  , parens (tok "par" *>
+     (Par_fun_symbol_decl_symbols <$> (parens $ many1 symbol) <*>
+                                   (left *> identifier) <*>
+                                   many1 sort' <*>
+                                   (many attribute <* right)))
   ]
+
 
 data Theory_attribute
   = Theory_attribute_sorts [Sort_symbol_decl]
@@ -337,14 +368,14 @@ instance Show Theory_attribute where
     Theory_attribute            a -> show a
 
 theory_attribute :: SMTLIB Theory_attribute
-theory_attribute = oneOf
-  [ do { tok $ Keyword ":sorts"; left; a <- many1 sort_symbol_decl; right; return $ Theory_attribute_sorts a }
-  , do { tok $ Keyword ":funs";  left; a <- many1 par_fun_symbol_decl; right; return $ Theory_attribute_funs a }
-  , do { tok $ Keyword ":sorts-description"; a <- string; return $ Theory_attribute_sorts_desc a }
-  , do { tok $ Keyword ":funs-description"; a <- string; return $ Theory_attribute_funs_desc a }
-  , do { tok $ Keyword ":definition"; a <- string; return $ Theory_attribute_definition a }
-  , do { tok $ Keyword ":values"; a <- string; return $ Theory_attribute_values a }
-  , do { tok $ Keyword ":notes"; a <- string; return $ Theory_attribute_notes a }
+theory_attribute = choice
+  [ do { kw "sorts"; left; a <- many1 sort_symbol_decl; right; return $ Theory_attribute_sorts a }
+  , do { kw "funs";  left; a <- many1 par_fun_symbol_decl; right; return $ Theory_attribute_funs a }
+  , do { kw "sorts-description"; a <- string; return $ Theory_attribute_sorts_desc a }
+  , do { kw ":funs-description"; a <- string; return $ Theory_attribute_funs_desc a }
+  , do { kw ":definition"; a <- string; return $ Theory_attribute_definition a }
+  , do { kw ":values"; a <- string; return $ Theory_attribute_values a }
+  , do { kw ":notes"; a <- string; return $ Theory_attribute_notes a }
   , attribute >>= return . Theory_attribute
   ]
 
@@ -356,7 +387,10 @@ instance Show Theory_decl where
     Theory_decl a b -> group $ ["theory", show a] ++ map show b
 
 theory_decl :: SMTLIB Theory_decl
-theory_decl = do { left; tok $ Symbol "theory"; a <- symbol; b <- many1 theory_attribute; right; return $ Theory_decl a b }
+theory_decl =
+  parens $ tok "theory" *> (Theory_decl <$> symbol  <*> many theory_attribute)
+
+
 
 data Logic_attribute
   = Logic_attribute_theories   [Symbol]
@@ -376,12 +410,12 @@ instance Show Logic_attribute where
     Logic_attribute             a -> show a
 
 logic_attribute :: SMTLIB Logic_attribute
-logic_attribute = oneOf
-  [ do { tok $ Keyword ":theories"; left; a <- many1 symbol; right; return $ Logic_attribute_theories a }
-  , do { tok $ Keyword ":language"; left; a <- string; right; return $ Logic_attribute_language a }
-  , do { tok $ Keyword ":extensions"; left; a <- string; right; return $ Logic_attribute_extensions a }
-  , do { tok $ Keyword ":values"; left; a <- string; right; return $ Logic_attribute_values a }
-  , do { tok $ Keyword ":notes"; left; a <- string; right; return $ Logic_attribute_notes a }
+logic_attribute = choice
+  [ do { kw "theories"; left; a <- many1 symbol; right; return $ Logic_attribute_theories a }
+  , do { kw "language"; left; a <- string; right; return $ Logic_attribute_language a }
+  , do { kw "extensions"; left; a <- string; right; return $ Logic_attribute_extensions a }
+  , do { kw "values"; left; a <- string; right; return $ Logic_attribute_values a }
+  , do { kw "notes"; left; a <- string; right; return $ Logic_attribute_notes a }
   , attribute >>= return . Logic_attribute
   ]
 
@@ -393,7 +427,7 @@ instance Show Logic where
     Logic a b -> group $ ["logic", a] ++ map show b
 
 logic :: SMTLIB Logic
-logic = do { left; tok $ Symbol "logic"; a <- symbol; b <- many1 logic_attribute; right; return $ Logic a b }
+logic = do { left; tok "logic"; a <- symbol; b <- many1 logic_attribute; right; return $ Logic a b }
 
 data Option
   = Print_success       Bool
@@ -425,18 +459,18 @@ instance Show Option where
     Option_attribute          a -> show a
 
 option :: SMTLIB Option
-option = oneOf
-  [ do { tok $ Symbol ":print-success";       a <- b_value; return $ Print_success       a }
-  , do { tok $ Symbol ":expand-definitions";  a <- b_value; return $ Expand_definitions  a }
-  , do { tok $ Symbol ":interactive-mode";    a <- b_value; return $ Interactive_mode    a }
-  , do { tok $ Symbol ":produce-proofs";      a <- b_value; return $ Produce_proofs      a }
-  , do { tok $ Symbol ":produce-unsat-cores"; a <- b_value; return $ Produce_unsat_cores a }
-  , do { tok $ Symbol ":produce-models";      a <- b_value; return $ Produce_models      a }
-  , do { tok $ Symbol ":produce-assignments"; a <- b_value; return $ Produce_assignments a }
-  , do { tok $ Symbol ":regular-output-channel";    a <- string; return $ Regular_output_channel    a }
-  , do { tok $ Symbol ":diagnostic-output-channel"; a <- string; return $ Diagnostic_output_channel a }
-  , do { tok $ Symbol ":random-seed"; a <- numeral; return $ Random_seed $ fromIntegral a }
-  , do { tok $ Symbol ":verbosity";   a <- numeral; return $ Verbosity   $ fromIntegral a }
+option = choice
+  [ do { tok ":print-success";       a <- b_value; return $ Print_success       a }
+  , do { tok ":expand-definitions";  a <- b_value; return $ Expand_definitions  a }
+  , do { tok ":interactive-mode";    a <- b_value; return $ Interactive_mode    a }
+  , do { tok ":produce-proofs";      a <- b_value; return $ Produce_proofs      a }
+  , do { tok ":produce-unsat-cores"; a <- b_value; return $ Produce_unsat_cores a }
+  , do { tok ":produce-models";      a <- b_value; return $ Produce_models      a }
+  , do { tok ":produce-assignments"; a <- b_value; return $ Produce_assignments a }
+  , do { tok ":regular-output-channel";    a <- string; return $ Regular_output_channel    a }
+  , do { tok ":diagnostic-output-channel"; a <- string; return $ Diagnostic_output_channel a }
+  , do { tok ":random-seed"; a <- numeral; return $ Random_seed $ fromIntegral a }
+  , do { tok ":verbosity";   a <- numeral; return $ Verbosity   $ fromIntegral a }
   , attribute >>= return . Option_attribute
   ]
 
@@ -462,14 +496,14 @@ instance Show Info_flag where
     All_statistics -> ":all-statistics"
 
 info_flag :: SMTLIB Info_flag
-info_flag = oneOf
-  [ do { tok $ Keyword ":error-behavior"; return Error_behavior }
-  , do { tok $ Keyword ":name"          ; return Name           }
-  , do { tok $ Keyword ":authors"       ; return Authors        }
-  , do { tok $ Keyword ":version"       ; return Version        }
-  , do { tok $ Keyword ":status"        ; return Status         }
-  , do { tok $ Keyword ":reason-unknown"; return Reason_unknown }
-  , do { tok $ Keyword ":all-statistics"; return All_statistics }
+info_flag = choice
+  [ do { kw "error-behavior"; return Error_behavior }
+  , do { kw "name"          ; return Name           }
+  , do { kw "authors"       ; return Authors        }
+  , do { kw "version"       ; return Version        }
+  , do { kw "status"        ; return Status         }
+  , do { kw "reason-unknown"; return Reason_unknown }
+  , do { kw "all-statistics"; return All_statistics }
   , keyword >>= return . Info_flag
   ]
 
@@ -517,26 +551,26 @@ instance Show Command where
     Exit -> group ["exit"]
 
 command :: SMTLIB Command
-command = oneOf
-  [ do { left; tok $ Symbol "set-logic"; a <- symbol; right; return $ Set_logic a }
-  , do { left; tok $ Symbol "set-option"; a <- option; right; return $ Set_option a }
-  , do { left; tok $ Symbol "set-info"; a <- attribute; right; return $ Set_info a }
-  , do { left; tok $ Symbol "declare-sort"; a <- symbol; b <- numeral; right; return $ Declare_sort a b }
-  , do { left; tok $ Symbol "define-sort"; a <- symbol; left; b <- many symbol; right; c <- sort'; right; return $ Define_sort a b c }
-  , do { left; tok $ Symbol "declare-fun"; a <- symbol; left; b <- many sort'; right; c <- sort'; right; return $ Declare_fun a b c }
-  , do { left; tok $ Symbol "define-fun"; a <- symbol; left; b <- many sorted_var; right; c <- sort'; d <- term; right; return $ Define_fun a b c d }
-  , do { left; tok $ Symbol "push"; a <- numeral; right; return $ Push $ fromIntegral a }
-  , do { left; tok $ Symbol "pop"; a <- numeral; right; return $ Pop $ fromIntegral a }
-  , do { left; tok $ Symbol "assert"; a <- term; right; return $ Assert a }
-  , do { left; tok $ Symbol "check-sat"; right; return $ Check_sat }
-  , do { left; tok $ Symbol "get-assertions"; right; return $ Get_assertions }
-  , do { left; tok $ Symbol "get-proof"; right; return $ Get_proof }
-  , do { left; tok $ Symbol "get-unsat-core"; right; return $ Get_unsat_core }
-  , do { left; tok $ Symbol "get-value"; left; a <- many1 term; right; right; return $ Get_value a }
-  , do { left; tok $ Symbol "get-assignment"; right; return $ Get_assignment }
-  , do { left; tok $ Symbol "get-option"; a <- keyword; right; return $ Get_option a }
-  , do { left; tok $ Symbol "get-info"; a <- info_flag; right; return $ Get_info a }
-  , do { left; tok $ Symbol "exit"; right; return $ Exit }
+command = choice
+  [ do { left; tok "set-logic"; a <- symbol; right; return $ Set_logic a }
+  , do { left; tok "set-option"; a <- option; right; return $ Set_option a }
+  , do { left; tok "set-info"; a <- attribute; right; return $ Set_info a }
+  , do { left; tok "declare-sort"; a <- symbol; b <- numeral; right; return $ Declare_sort a b }
+  , do { left; tok "define-sort"; a <- symbol; left; b <- many symbol; right; c <- sort'; right; return $ Define_sort a b c }
+  , do { left; tok "declare-fun"; a <- symbol; left; b <- many sort'; right; c <- sort'; right; return $ Declare_fun a b c }
+  , do { left; tok "define-fun"; a <- symbol; left; b <- many sorted_var; right; c <- sort'; d <- term; right; return $ Define_fun a b c d }
+  , do { left; tok "push"; a <- numeral; right; return $ Push $ fromIntegral a }
+  , do { left; tok "pop"; a <- numeral; right; return $ Pop $ fromIntegral a }
+  , do { left; tok "assert"; a <- term; right; return $ Assert a }
+  , do { left; tok "check-sat"; right; return $ Check_sat }
+  , do { left; tok "get-assertions"; right; return $ Get_assertions }
+  , do { left; tok "get-proof"; right; return $ Get_proof }
+  , do { left; tok "get-unsat-core"; right; return $ Get_unsat_core }
+  , do { left; tok "get-value"; left; a <- many1 term; right; right; return $ Get_value a }
+  , do { left; tok "get-assignment"; right; return $ Get_assignment }
+  , do { left; tok "get-option"; a <- keyword; right; return $ Get_option a }
+  , do { left; tok "get-info"; a <- info_flag; right; return $ Get_info a }
+  , do { left; tok "exit"; right; return $ Exit }
   ]
 
 data Script = Script [Command]
@@ -545,7 +579,8 @@ instance Show Script where
   show (Script a) = unlines $ map show a
 
 script :: SMTLIB Script
-script = return Script `apply` many command `discard` eof
+script = Script <$> many command <* eof
+
 
 data Gen_response
   = Unsupported
@@ -559,10 +594,10 @@ instance Show Gen_response where
     Error a      -> group ["error", show a]
 
 gen_response :: SMTLIB Gen_response
-gen_response = oneOf
-  [ do { tok $ Symbol "unsupported"; return Unsupported }
-  , do { tok $ Symbol "success"; return Success }
-  , do { left; tok $ Symbol "error"; a <- string; right; return $ Error a }
+gen_response = choice
+  [ do { tok "unsupported"; return Unsupported }
+  , do { tok "success"; return Success }
+  , do { left; tok "error"; a <- string; right; return $ Error a }
   ]
 
 data Error_behavior
@@ -575,9 +610,9 @@ instance Show Error_behavior where
     Continued_execution -> "continued-execution"
 
 error_behavior :: SMTLIB Error_behavior
-error_behavior = oneOf
-  [ do { tok $ Symbol "immediate-exit"; return Immediate_exit }
-  , do { tok $ Symbol "continued-execution"; return Continued_execution }
+error_behavior = choice
+  [ do { tok "immediate-exit"; return Immediate_exit }
+  , do { tok "continued-execution"; return Continued_execution }
   ]
 
 data Reason_unknown
@@ -592,10 +627,10 @@ instance Show Reason_unknown where
     Incomplete -> "incomplete"
 
 reason_unknown :: SMTLIB Reason_unknown
-reason_unknown = oneOf
-  [ do { tok $ Symbol "timeout"; return Timeout }
-  , do { tok $ Symbol "memout"; return Memout }
-  , do { tok $ Symbol "incomplete"; return Incomplete }
+reason_unknown = choice
+  [ do { tok "timeout"; return Timeout }
+  , do { tok "memout"; return Memout }
+  , do { tok "incomplete"; return Incomplete }
   ]
 
 data Status
@@ -610,10 +645,10 @@ instance Show Status where
     Unknown -> "unknown"
 
 status :: SMTLIB Status
-status = oneOf
-  [ do { tok $ Symbol "sat"; return Sat }
-  , do { tok $ Symbol "unsat"; return Unsat }
-  , do { tok $ Symbol "unknown"; return Unknown }
+status = choice
+  [ do { tok "sat"; return Sat }
+  , do { tok "unsat"; return Unsat }
+  , do { tok "unknown"; return Unknown }
   ]
 
 data Info_response
@@ -636,13 +671,13 @@ instance Show Info_response where
     Info_response_attribute      a -> show a
 
 info_response :: SMTLIB Info_response
-info_response = oneOf
-  [ do { tok $ Keyword ":error-behavior"; a <- error_behavior; return $ Info_response_error_behavior a }
-  , do { tok $ Keyword ":name"; a <- string; return $ Info_response_name a }
-  , do { tok $ Keyword ":authors"; a <- string; return $ Info_response_authors a }
-  , do { tok $ Keyword ":version"; a <- string; return $ Info_response_version a }
-  , do { tok $ Keyword ":status"; a <- status; return $ Info_response_status a }
-  , do { tok $ Keyword ":reason-unknown"; a <- reason_unknown; return $ Info_response_reason_unknown a }
+info_response = choice
+  [ do { kw "error-behavior"; a <- error_behavior; return $ Info_response_error_behavior a }
+  , do { kw "name"; a <- string; return $ Info_response_name a }
+  , do { kw "authors"; a <- string; return $ Info_response_authors a }
+  , do { kw "version"; a <- string; return $ Info_response_version a }
+  , do { kw "status"; a <- status; return $ Info_response_status a }
+  , do { kw "reason-unknown"; a <- reason_unknown; return $ Info_response_reason_unknown a }
   , do attribute >>= return . Info_response_attribute
   ]
 
@@ -674,7 +709,7 @@ instance Show Command_response where
     Gta_response  a -> group $ [ group [(show a), (showBool b)] | (a, b) <- a ]
 
 command_response :: SMTLIB Command_response
-command_response = oneOf
+command_response = choice
   [ gen_response >>= return . Gen_response
   , info_response >>= return . Info_response
   , do { left; a <- many1 info_response; right; return $ Gi_response a }
@@ -687,7 +722,7 @@ command_response = oneOf
   ]
 
 responses :: SMTLIB [Command_response]
-responses = return id `apply` many command_response `discard` eof
+responses =  many command_response <* eof
 
 group :: [String] -> String
 group a = "( " ++ intercalate " " a ++ " )"
@@ -695,79 +730,101 @@ group a = "( " ++ intercalate " " a ++ " )"
 showBool :: Bool -> String
 showBool a = if a then "true" else "false"
 
-type SMTLIB a = Parser Token a
--- type SMTLIB a = Parser a
+type SMTLIB a = Parser a
 
-tok :: Token -> SMTLIB ()
-tok a = satisfy (==  a) >> return ()
 
-left :: SMTLIB ()
-left = tok LeftParen
+left :: SMTLIB Char
+left = whiteSpace >> C.char '('
 
-right :: SMTLIB ()
-right = tok RightParen
+right :: SMTLIB Char
+right = whiteSpace >> C.char ')'
 
-leftBracket,rightBracket :: SMTLIB ()
-leftBracket = tok LeftBracket
-rightBracket = tok RightBracket
+leftBracket,rightBracket :: SMTLIB Char
+leftBracket = whiteSpace >> C.char '['
+rightBracket = whiteSpace >> C.char ']'
 
+parens p = left >> p <* right
+eof = whiteSpace >> endOfInput
 
 numeral :: SMTLIB Numeral
 numeral = do
-  a <- satisfy (\ a -> case a of { Numeral _ -> True; _ -> False })
-  case a of
-    Numeral a -> return a
-    _ -> undefined
+  whiteSpace
+  n <- C.number
+  case n of
+    C.I i -> return i
+    _ -> fail ""
 
+comment = C.skipSpace >>
+          C.char ';' >> skipWhile (not . C.isEndOfLine) >> C.endOfLine >>
+          do {end <- atEnd; unless end whiteSpace}
+
+
+whiteSpace = C.skipSpace >> (Atto.option () comment)
+-- FIXME: This doen't handle escapes correctly.
 string :: SMTLIB String
 string = do
-  a <- satisfy (\ a -> case a of { String _ -> True; _ -> False })
-  case a of
-    String a -> return a
-    _ -> undefined
+  whiteSpace
+  B.unpack <$> (doubleQuote *> C.takeWhile (not . (== '"')) <* doubleQuote)
+  where doubleQuote = C.char '"'
+
+
 
 symbol :: SMTLIB Symbol
 symbol = do
-  a <- satisfy (\ a -> case a of { Symbol _ -> True; _ -> False })
-  case a of
-    Symbol a -> return a
-    _ -> undefined
+    whiteSpace -- C.skipSpace
+    B.unpack <$> C.takeWhile1 sat
+  where sat x = C.isAlpha_ascii x || C.isDigit x || isOther x
+        isOther = C.inClass "+-/*=%?!.$_~&^<>@"
+
 
 keyword :: SMTLIB Keyword
 keyword = do
-  a <- satisfy (\ a -> case a of { Keyword _ -> True; _ -> False })
-  case a of
-    Keyword a -> return a
-    _ -> undefined
+  whiteSpace
+  C.char ':'
+  (':':) <$> symbol
+
+kw :: String -> SMTLIB ()
+kw s = do
+  whiteSpace
+  C.char ':'
+  C.string (B.pack s)
+  return ()
+
 
 b_value :: SMTLIB Bool
-b_value = oneOf
-  [ do { tok $ Symbol "true"; return True }
-  , do { tok $ Symbol "false"; return False }
+b_value = choice
+  [ do { tok "true"; return True }
+  , do { tok "false"; return False }
   ]
 
+tok t = whiteSpace >> C.string (B.pack t)
+
+
+
 -- | Lazily parses an SMT-LIB command script.
-parseScript :: String -> Either String Script
-parseScript s = fst $ runParser script $ lexSMTLIB s
+parseScript :: B.ByteString -> Either String Script
+parseScript s = parseOnly script s
 
 -- | Lazily parses an SMT-LIB command responses.
-parseResponses :: String -> Either String [Command_response]
-parseResponses s = fst $ runParser responses $ lexSMTLIB s
+parseResponses :: B.ByteString -> Result [Command_response]
+parseResponses s = parse responses s
 
 -- | Lazily parses an SMT-LIB theory declaration.
-parseTheory :: String -> Either String Theory_decl
-parseTheory s = fst $ runParser theory_decl $ lexSMTLIB s
+parseTheory :: B.ByteString -> Result Theory_decl
+parseTheory s = parse theory_decl s
+
 
 -- | Lazily parses an SMT-LIB logic.
-parseLogic :: String -> Either String Logic
-parseLogic s = fst $ runParser logic $ lexSMTLIB s
+parseLogic :: B.ByteString -> Result Logic
+parseLogic s = parse logic s
 
+{-
 -- | Checks the parsing of a command script.
 checkScript :: FilePath -> IO Bool
 checkScript file = do
-  script <- readFile file
-  let orig = clean script
-      parsed = clean $ show $ parseScript script
+  script <- B.readFile file
+  let orig = script
+      parsed = show $ parseScript script
   if orig == parsed then return True else do
     writeFile (file ++ ".fail") $ show $ parseScript script
     return False
@@ -782,8 +839,8 @@ checkResponses file = do
     writeFile (file ++ ".fail") $ show $ parseResponses script
     return False
 
-clean :: String -> String
-clean = filter (flip notElem " \t\r\n") . unlines . map (takeWhile (/= ';')) . lines
+clean :: B.ByteString -> B.ByteString
+clean = B.filter (C.notInClass " \t\r\n") . unlines . map (takeWhile (/= ';')) . lines
 
 -- | Recursively searches current directory for *.smt2 files to test the parser.
 checkParser :: IO ()
@@ -811,7 +868,7 @@ checkParser = do
             hFlush stdout
             return pass
           else return True
-
+-}
 
 
 
