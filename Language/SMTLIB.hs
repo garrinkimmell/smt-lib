@@ -1,6 +1,5 @@
 -- | Parsing and printing SMT-LIB.
 module Language.SMTLIB
-{-
   (
   -- * Syntax
     Numeral
@@ -47,29 +46,31 @@ module Language.SMTLIB
   , checkResponses
   , checkParser
   -- * For Hind
+  , parseScriptFile
+  , command_response
   , responses
   , script
-  , left, right, symbol, identifier, tok, lexSMTLIB
-  , Token(..)
+  , left, right, symbol, identifier, tok
+  -- , Token(..)
   )
--}
+
   where
 
 import Data.List hiding (group)
 import System.Directory
 import System.IO
 import Control.Monad(unless)
--- import Text.ParserCombinators.Poly.Lazy hiding (Success)
--- import Text.ParserCombinators.Poly.Plain hiding (Success)
 
 import Text.Printf
 import Control.Applicative hiding (many)
-import Language.SMTLIB.Lexer
 
 import qualified Data.ByteString.Char8 as B
 import Data.Attoparsec hiding (string,option)
 import qualified Data.Attoparsec as Atto
 import qualified Data.Attoparsec.Char8 as C
+-- These are redundant because the Iteratee interface doesn't work.
+-- import Data.Attoparsec.Iteratee
+-- import Data.Iteratee(fileDriver,Iteratee)
 
 
 
@@ -579,7 +580,7 @@ instance Show Script where
   show (Script a) = unlines $ map show a
 
 script :: SMTLIB Script
-script = Script <$> many command <* eof
+script = Script <$> many command <* whiteSpace  <* eof
 
 
 data Gen_response
@@ -595,10 +596,13 @@ instance Show Gen_response where
 
 gen_response :: SMTLIB Gen_response
 gen_response = choice
-  [ do { tok "unsupported"; return Unsupported }
-  , do { tok "success"; return Success }
-  , do { left; tok "error"; a <- string; right; return $ Error a }
+  [ pure Unsupported <$> tok "unsupported"
+  , pure Success <$> tok "success"
+  , parens $ Error <$> (tok "error" *> string)
+  --do { left; tok "error"; a <- string; right; return $ Error a }
   ]
+
+
 
 data Error_behavior
   = Immediate_exit
@@ -710,19 +714,19 @@ instance Show Command_response where
 
 command_response :: SMTLIB Command_response
 command_response = choice
-  [ gen_response >>= return . Gen_response
-  , info_response >>= return . Info_response
-  , do { left; a <- many1 info_response; right; return $ Gi_response a }
-  , status >>= return . Cs_response
-  , do { left; a <- many term; right; return $ Ga_response a }
-  , s_expr >>= return . Gp_response
-  , do { left; a <- many symbol; right; return $ Guc_response a }
-  , do { left; a <- many1 (do { left; a <- term; b <- term; return (a, b) }); right; return $ Gv_response a }
-  , do { left; a <- many (do { left; a <- symbol; b <- b_value; return (a, b) }); right; return $ Gta_response a }
+  [ Gen_response <$> gen_response
+  , Info_response <$> info_response
+  , parens $ Gi_response <$> many1 info_response
+  , Cs_response <$> status
+  , parens $ Ga_response <$>  (many term)
+  , Gp_response <$> s_expr
+  , parens $ Guc_response <$> many symbol
+  , parens $ (Gv_response <$> many1 ((,) <$> term  <*> term))
+  , parens $ Gta_response <$> many (parens $  (,) <$> symbol <*> b_value)
   ]
 
 responses :: SMTLIB [Command_response]
-responses =  many command_response <* eof
+responses =  many command_response --  <* eof
 
 group :: [String] -> String
 group a = "( " ++ intercalate " " a ++ " )"
@@ -772,9 +776,10 @@ string = do
 symbol :: SMTLIB Symbol
 symbol = do
     whiteSpace -- C.skipSpace
-    B.unpack <$> C.takeWhile1 sat
-  where sat x = C.isAlpha_ascii x || C.isDigit x || isOther x
-        isOther = C.inClass "+-/*=%?!.$_~&^<>@"
+    B.unpack <$> C.takeWhile1 isSymbolChar
+
+isSymbolChar x = C.isAlpha_ascii x || C.isDigit x || isOther x
+  where isOther = C.inClass "+-/*=%?!.$_~&^<>@"
 
 
 keyword :: SMTLIB Keyword
@@ -787,8 +792,8 @@ kw :: String -> SMTLIB ()
 kw s = do
   whiteSpace
   C.char ':'
-  C.string (B.pack s)
-  return ()
+  tok s
+
 
 
 b_value :: SMTLIB Bool
@@ -797,7 +802,11 @@ b_value = choice
   , do { tok "false"; return False }
   ]
 
-tok t = whiteSpace >> C.string (B.pack t)
+tok t = do
+  s <- symbol
+  unless (s == t) $ fail "token did not match"
+
+
 
 
 
@@ -818,29 +827,38 @@ parseTheory s = parse theory_decl s
 parseLogic :: B.ByteString -> Result Logic
 parseLogic s = parse logic s
 
-{-
+
+
+-- | Checks the parsing of a command file with the given parser
+-- checkScript :: FilePath -> IO Bool
+checkFile parser file = do
+  cnts <- B.readFile file
+  let orig = clean cnts
+      parsed = parseOnly parser cnts
+  case parsed of
+    Left _ -> do
+      writeFile (file ++ ".fail") $ show parsed
+      return False
+    Right val
+          | orig == clean (B.pack $ show val) -> return True
+          | otherwise ->  do
+                     B.putStrLn orig
+                     B.putStrLn cleanedval
+                     writeFile (file ++ ".fail") $ show val
+                     return False
+      where cleanedval = clean $ B.pack $ show val
+
 -- | Checks the parsing of a command script.
 checkScript :: FilePath -> IO Bool
-checkScript file = do
-  script <- B.readFile file
-  let orig = script
-      parsed = show $ parseScript script
-  if orig == parsed then return True else do
-    writeFile (file ++ ".fail") $ show $ parseScript script
-    return False
+checkScript = checkFile script
 
 -- | Checks the parsing of command responses.
 checkResponses :: FilePath -> IO Bool
-checkResponses file = do
-  script <- readFile file
-  let orig = clean script
-      parsed = clean $ show $ parseResponses script
-  if orig == parsed then return True else do
-    writeFile (file ++ ".fail") $ show $ parseResponses script
-    return False
+checkResponses = checkFile responses
 
 clean :: B.ByteString -> B.ByteString
-clean = B.filter (C.notInClass " \t\r\n") . unlines . map (takeWhile (/= ';')) . lines
+clean = B.filter (not . flip elem " \t\r\n")  . B.unlines . map (B.takeWhile (/= ';')) . B.lines
+
 
 -- | Recursively searches current directory for *.smt2 files to test the parser.
 checkParser :: IO ()
@@ -868,7 +886,20 @@ checkParser = do
             hFlush stdout
             return pass
           else return True
--}
+
+
+
+
+
+-- Iteratee based file parsing The following doesn't work, because it seems to
+-- block consuming the EOF when running in ghci or if compiled with -threaded. Perhaps related
+-- to this bug: http://hackage.haskell.org/trac/ghc/ticket/5060
+--parseScriptFile :: FilePath -> IO Script
+--parseScriptFile = fileDriver (parserToIteratee script)
+parseScriptFile :: FilePath -> IO (Either String Script)
+parseScriptFile path = do
+  cnts <- B.readFile path
+  return $ parseOnly script cnts
 
 
 
