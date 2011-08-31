@@ -749,9 +749,6 @@ left = whiteSpace >> C.char '('
 right :: SMTLIB Char
 right = whiteSpace >> C.char ')'
 
-leftBracket,rightBracket :: SMTLIB Char
-leftBracket = whiteSpace >> C.char '['
-rightBracket = whiteSpace >> C.char ']'
 
 parens p = left >> p <* right
 eof = whiteSpace >> endOfInput
