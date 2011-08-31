@@ -1,3 +1,4 @@
+{-# LANGUAGE PackageImports #-}
 -- | Parsing and printing SMT-LIB.
 module Language.SMTLIB
   (
@@ -48,6 +49,7 @@ module Language.SMTLIB
   -- * For Hind
   , parseScriptFile
   , commandResponseSource
+  , attribute_value
   )
 
   where
@@ -69,7 +71,7 @@ import Data.Attoparsec.Iteratee
 import Data.Iteratee hiding (group,length)
 import Data.Iteratee.IO.Handle(enumHandle)
 import Control.Exception
-import Control.Monad.Trans
+import "monads-fd" Control.Monad.Trans
 
 
 
@@ -90,19 +92,25 @@ instance Show Spec_constant where
     Spec_constant_numeral     a -> show a
     Spec_constant_decimal     a -> show (realToFrac a :: Double)
     Spec_constant_hexadecimal a -> printf "#x%s" a
-    Spec_constant_binary      a -> printf "bvbin%s[%d]" [ if a then '1' else '0' | a <- a ] (length a)
+    Spec_constant_binary      a -> printf "#b%s" [ if a then '1' else '0' | a <- a ]
     Spec_constant_string      a -> show a
 
 spec_constant :: SMTLIB Spec_constant
-spec_constant = choice
-  [ Spec_constant_numeral <$> numeral
+spec_constant = whiteSpace >>
+                choice
+  [ C.char '#' *>
+    ((C.char 'b' *>  (Spec_constant_binary .  map (== '1') . B.unpack <$> (C.takeWhile1 isBinChar))) <|>
+     (C.char 'h' *>  ((Spec_constant_hexadecimal . B.unpack)  <$> C.takeWhile1 isHexChar)))
+  , Spec_constant_numeral <$> numeral
   , Spec_constant_string <$> string
-    -- FIXME: Should I really be using double?
   , Spec_constant_decimal . toRational  <$> C.double
-    -- TODO: Handle Hexadecimal and Binary.
-    -- , Spec_constant_hexadecimal <$> hexadecimal
-    -- , Spec_constant_binary <$> hexadecimal
   ]
+  where isHexChar =  C.inClass (['0'..'9'] ++ ['a'..'f'] ++ ['A'..'F'])
+        isBinChar = C.inClass "01"
+
+    -- whiteSpace -- C.skipSpace
+    -- B.unpack <$> C.takeWhile1 isSymbolChar
+
 
 data S_expr
   = S_expr_constant Spec_constant
@@ -151,8 +159,7 @@ data Sort
 instance Show Sort where
   show a = case a of
     Sort_bool -> "Bool"
-    -- Z3 specific bitvec syntax
-    Sort_bitvec size -> "BitVec[" ++ show size ++ "]"
+    Sort_bitvec size -> "(_ BitVec " ++ show size  ++ ")"
     Sort_identifier  a -> show a
     Sort_identifiers a b -> group $ show a : map show b
 
@@ -162,7 +169,7 @@ sort' = choice
   [ tok "Bool" >> return Sort_bool
   ,
     -- For z3 specific bitvec syntax.
-    tok "BitVec" *> leftBracket *> (Sort_bitvec <$> numeral) <* rightBracket
+    parens (whiteSpace *> tok "_" *> tok "BitVec" *> (Sort_bitvec <$> numeral))
   , Sort_identifier <$>  identifier
   , left *> (Sort_identifiers <$> identifier <*>  many1 sort') <* right
   ]
@@ -910,7 +917,7 @@ commandResponseSource handle action =
         f k (EOF Nothing) =
           case feed (k B.empty) B.empty of
             -- Ignore EOF errors? FIXME: Horrible Hack.
-            Atto.Fail _ [] _ -> icont (f k)
+            Atto.Fail _ [] _ -> icont (f k) Nothing
             Atto.Fail _ err dsc -> throwErr (toException $ ParseError err ("eof: " ++ dsc))
             Atto.Partial _ -> throwErr (toException EofException)
             Atto.Done rest v
