@@ -867,9 +867,9 @@ clean = B.filter (not . flip elem " \t\r\n")  . B.unlines . map (B.takeWhile (/=
 
 
 -- | Recursively searches current directory for *.smt2 files to test the parser.
-checkParser :: String -> IO ()
-checkParser dir = do
-  result <- checkDir dir
+checkParser :: IO ()
+checkParser = do
+  result <- checkDir "."
   if result
     then putStrLn "\nall tests passed\n"
     else putStrLn "\nTESTS FAILED\n"
