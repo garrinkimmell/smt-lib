@@ -50,6 +50,7 @@ module Language.SMTLIB
   , parseScriptFile
   , commandResponseSource
   , attribute_value
+  , command_response
   )
 
   where
@@ -67,9 +68,12 @@ import Data.Attoparsec hiding (string,option)
 import qualified Data.Attoparsec as Atto
 import qualified Data.Attoparsec.Char8 as C
 
-import Data.Attoparsec.Iteratee
-import Data.Iteratee hiding (group,length)
-import Data.Iteratee.IO.Handle(enumHandle)
+-- import Data.Attoparsec.Iteratee
+-- import Data.Iteratee hiding (group,length)
+-- import Data.Iteratee.IO.Handle(enumHandle)
+import Data.Enumerator hiding (map,mapM,Error)
+import Data.Enumerator.Binary(enumHandle)
+import Data.Attoparsec.Enumerator
 import Control.Exception
 import "monads-fd" Control.Monad.Trans
 
@@ -831,7 +835,6 @@ parseLogic :: B.ByteString -> Result Logic
 parseLogic s = parse logic s
 
 
-
 -- | Checks the parsing of a command file with the given parser
 -- checkScript :: FilePath -> IO Bool
 checkFile parser file = do
@@ -864,9 +867,9 @@ clean = B.filter (not . flip elem " \t\r\n")  . B.unlines . map (B.takeWhile (/=
 
 
 -- | Recursively searches current directory for *.smt2 files to test the parser.
-checkParser :: IO ()
-checkParser = do
-  result <- checkDir "."
+checkParser :: String -> IO ()
+checkParser dir = do
+  result <- checkDir dir
   if result
     then putStrLn "\nall tests passed\n"
     else putStrLn "\nTESTS FAILED\n"
@@ -908,25 +911,8 @@ parseScriptFile path = do
 
 -- Process a stream of command responses from the handle, invoking the parameter
 -- action on each response.
-commandResponseSource handle action =
-    enumHandle 1 handle (responseIteratee command_response) >>= run >> return ()
-  where responseIteratee p = icont (f (parse p)) Nothing
-        f k (EOF Nothing) =
-          case feed (k B.empty) B.empty of
-            -- Ignore EOF errors? FIXME: Horrible Hack.
-            Atto.Fail _ [] _ -> icont (f k) Nothing
-            Atto.Fail _ err dsc -> throwErr (toException $ ParseError err ("eof: " ++ dsc))
-            Atto.Partial _ -> throwErr (toException EofException)
-            Atto.Done rest v
-              | B.null rest -> idone v (EOF Nothing)
-              | otherwise -> idone v (Chunk rest)
-        f _ (EOF (Just e)) = throwErr e
-        f k (Chunk s)
-          | B.null s = icont (f k) Nothing
-          | otherwise = do
-              case k s of
-                Atto.Fail _ err dsc -> throwErr (toException $ ParseError err ("chunk: " ++ dsc))
-                Atto.Partial k' -> icont (f k') Nothing
-                Atto.Done rest v -> do
-                       lift $ action v
-                       icont (f (\bs -> feed (parse command_response rest) bs)) Nothing
+commandResponseSource handle action = run_ $ enumHandle 10 handle $$ loop
+  where loop = do
+          msg <- iterParser command_response
+          liftIO (action msg)
+          loop
