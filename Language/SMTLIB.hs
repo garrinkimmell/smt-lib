@@ -77,7 +77,11 @@ import Data.Attoparsec.Enumerator
 import Control.Exception
 import "monads-fd" Control.Monad.Trans
 
-
+-- attoparsec doesn't provide many anymore.
+many :: (Alternative f) => f a -> f [a]
+many v = many_v
+    where many_v = some_v <|> pure []
+	  some_v = (:) <$> v <*> many_v
 
 
 type Numeral      = Integer
